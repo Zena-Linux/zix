@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 import argparse
-import hashlib
 import json
 import os
 import pathlib
@@ -23,7 +22,6 @@ CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 MANIFEST_FILE = CONFIG_DIR / "zix.json"
 STATE_FILE = LOCAL_DIR / "state.json"
-
 
 FLAKE_TEMPLATE = textwrap.dedent("""\
 {{
@@ -142,7 +140,8 @@ def normalize_manifest(man: Dict) -> Dict:
         if s:
             cleaned.append(s)
     unique_sorted = sorted(set(cleaned))
-    return {"packages": unique_sorted}
+    return {"packages": unique_sorted,
+            **({k: v for k, v in man.items() if k != "packages"})}
 
 
 def read_manifest() -> Dict:
@@ -169,19 +168,10 @@ def save_state(state: Dict) -> None:
     write_json(STATE_FILE, state)
 
 
-def manifest_hash(man: Dict) -> str:
-    txt = json.dumps(man, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(txt.encode("utf-8")).hexdigest()[:12]
-
-
-def flake_dir_for_hash(hash_: str) -> pathlib.Path:
-    return LOCAL_DIR / f"flake-{hash_}"
-
-
-def current_flake_dir() -> Optional[pathlib.Path]:
-    st = read_state()
-    p = st.get("current_flake")
-    return pathlib.Path(p) if p else None
+def flake_dir() -> pathlib.Path:
+    d = LOCAL_DIR / "flake"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def generate_flake_nix_text(packages: List[str],
@@ -214,74 +204,6 @@ def run_proc(cmd: List[str],
         return 127
 
 
-def build_flake(force: bool = False, show: bool = False) -> None:
-    man = read_manifest()
-    h = manifest_hash(man)
-    flake_dir = flake_dir_for_hash(h)
-    flake_dir.mkdir(parents=True, exist_ok=True)
-    flake_path = flake_dir / "flake.nix"
-    generated = generate_flake_nix_text(
-        man.get("packages", []), man.get("nixpkgs"))
-    if flake_path.exists() and not force:
-        existing = flake_path.read_text()
-        if existing == generated:
-            ok(f"flake already up-to-date: {flake_dir}")
-            state = read_state()
-            state["current_flake"] = str(flake_dir.resolve())
-            save_state(state)
-            if show:
-                print(generated)
-            return
-    atomic_write(flake_path, generated)
-    ok(f"Generated flake.nix at: {flake_path}")
-    if show:
-        print("----- flake.nix -----")
-        print(generated)
-        print("---------------------")
-    if ensure_nix_available():
-        rc = run_proc(
-            ["nix", "flake", "lock"],
-            cwd=flake_dir,
-            check=False
-        )
-        if rc == 0:
-            ok("Updated flake.lock")
-        else:
-            warn("Failed to update flake.lock (continuing)")
-    else:
-        warn("nix CLI not found; skipping flake.lock")
-    state = read_state()
-    state["current_flake"] = str(flake_dir.resolve())
-    state["manifest_hash"] = h
-    state["last_built"] = int(time.time())
-    save_state(state)
-    ok(f"Flake stored at: {flake_dir}")
-
-
-def apply_profile() -> None:
-    state = read_state()
-    flake = pathlib.Path(state.get("current_flake")).resolve()
-    if not flake:
-        error("No flake built yet. Run `zix build` first.")
-        return
-    if not ensure_nix_available():
-        error("nix CLI not found; cannot apply profile.")
-        return
-    run_proc(["nix", "run", f"path:{str(flake)}#profile.switch"], cwd=flake)
-
-
-def rollback_profile() -> None:
-    state = read_state()
-    flake = pathlib.Path(state.get("current_flake")).resolve()
-    if not flake:
-        error("No flake built yet. Run `zix build` first.")
-        return
-    if not ensure_nix_available():
-        error("nix CLI not found; cannot rollback profile.")
-        return
-    run_proc(["nix", "run", f"path:{str(flake)}#profile.rollback"], cwd=flake)
-
-
 def get_installed_packages() -> Optional[set[str]]:
     try:
         current_env = subprocess.check_output(
@@ -299,13 +221,11 @@ def get_installed_packages() -> Optional[set[str]]:
             warn("Not a zix environment")
             return None
 
-        # Get derivation path
         drv_path = subprocess.check_output(
             ["nix-store", "--query", "--deriver", current_env],
             text=True
         ).strip()
 
-        # Get derivation JSON
         drv_json = subprocess.check_output(
             ["nix", "derivation", "show", drv_path],
             text=True
@@ -315,12 +235,10 @@ def get_installed_packages() -> Optional[set[str]]:
         installed_packages = set(re.findall(pattern, drv_json))
 
         if not installed_packages:
-            # Fallback to JSON parsing if regex fails
             drv_data = json.loads(drv_json)
             pkgs_json = list(drv_data.values())[0]["env"]["pkgs"]
             pkgs_data = json.loads(pkgs_json)
             installed_packages = set()
-
             for item in pkgs_data:
                 for path in item["paths"]:
                     basename = os.path.basename(path)
@@ -330,17 +248,8 @@ def get_installed_packages() -> Optional[set[str]]:
 
         return installed_packages
 
-    except subprocess.CalledProcessError as e:
-        if "No such file or directory" in str(e):
-            warn("No nix environment currently active")
-        else:
-            warn(f"Could not query installed packages: {e}")
-        return None
-    except (json.JSONDecodeError, KeyError, IndexError) as e:
-        error(f"Failed to parse derivation data: {e}")
-        return None
     except Exception as e:
-        error(f"Unexpected error: {e}")
+        warn(f"Could not query installed packages: {e}")
         return None
 
 
@@ -351,7 +260,6 @@ def compare_manifest_with_installed(manifest_packages: set[str],
         return
 
     warn("Out of sync!")
-
     missing = manifest_packages - installed_packages
     extra = installed_packages - manifest_packages
 
@@ -407,8 +315,8 @@ def cmd_list() -> None:
             print(f"  - {p}")
     else:
         print("  (none)")
-    print()
 
+    print()
     installed_packages = get_installed_packages()
 
     if installed_packages is None:
@@ -423,20 +331,77 @@ def cmd_list() -> None:
     compare_manifest_with_installed(manifest_packages, installed_packages)
 
 
-def cmd_search(term: str) -> None:
-    if not ensure_nix_available():
-        error("nix CLI not found; cannot search.")
+def build_cmd(force: bool = False, show: bool = False) -> None:
+    flake_d = flake_dir()
+    flake_path = flake_d / "flake.nix"
+    man = read_manifest()
+    generated = generate_flake_nix_text(
+        man.get("packages", []), man.get("nixpkgs")
+    )
+
+    if flake_path.exists() and flake_path.read_text() == \
+            generated and not force:
+        ok("flake already up-to-date")
+    else:
+        atomic_write(flake_path, generated)
+        ok(f"Written flake to {flake_path}")
+
+    if show:
+        print("----- flake.nix -----")
+        print(generated)
+        print("---------------------")
+
+    if ensure_nix_available():
+        run_proc(["nix", "flake", "lock"], cwd=flake_d, check=False)
+    else:
+        warn("nix CLI not found; skipping lock")
+
+    state = read_state()
+    state["current_flake"] = str(flake_d.resolve())
+    state["last_built"] = int(time.time())
+    save_state(state)
+
+
+def cmd_apply() -> None:
+    state = read_state()
+    flake = state.get("current_flake")
+    if not flake:
+        error("No flake built yet. Run `zix build` first.")
         return
-    run_proc(["nix", "search", "nixpkgs", term])
+    if not ensure_nix_available():
+        error("nix CLI not found; cannot apply.")
+        return
+    run_proc(["nix", "run", f"path:{
+             flake}#profile.switch"], cwd=pathlib.Path(flake))
+
+
+def cmd_rollback() -> None:
+    state = read_state()
+    flake = state.get("current_flake")
+    if not flake:
+        error("No flake built yet.")
+        return
+    if not ensure_nix_available():
+        error("nix CLI not found; cannot rollback.")
+        return
+    run_proc(["nix", "run", f"path:{
+             flake}#profile.rollback"], cwd=pathlib.Path(flake))
 
 
 def cmd_status() -> None:
     man = read_manifest()
-    h = manifest_hash(man)
+    manifest_packages = set(man.get("packages", []))
     state = read_state()
+
     print(f"manifest: {MANIFEST_FILE.resolve()}")
-    print(f"manifest-hash: {h}")
-    print(f"packages: {len(man.get('packages', []))}")
+    print(f"packages: {len(manifest_packages)}")
+
+    installed_packages = get_installed_packages()
+    if installed_packages is not None:
+        print()
+        compare_manifest_with_installed(manifest_packages, installed_packages)
+
+    print()
     active = state.get("current_flake")
     if active:
         print(f"active_flake: {active}")
@@ -449,35 +414,70 @@ def cmd_status() -> None:
 
 def main(argv=None) -> None:
     description = "zix - declarative & imperative user profile manager for Nix"
-    epilog = "Examples: zix init | zix add git | zix build --show | zix apply"
+    epilog = textwrap.dedent(
+        "Examples:\n"
+        "  zix init\n"
+        "  zix add git\n"
+        "  zix build --show\n"
+        "  zix apply\n"
+        "  zix status\n"
+        "  zix list\n"
+    )
+
     parser = argparse.ArgumentParser(
         prog="zix",
         description=description,
         epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+
     sub = parser.add_subparsers(dest="cmd", required=True)
+
     sub.add_parser("init", help="create a new zix.json manifest")
+
     p_add = sub.add_parser(
-        "add", help="add package(s) to manifest (nixpkgs attribute names)")
-    p_add.add_argument("pkgs", nargs="+",
-                       help="package name(s) (nix attributes)")
-    p_rm = sub.add_parser("remove", help="remove package(s) from manifest")
-    p_rm.add_argument("pkgs", nargs="+",
-                      help="package name(s) (nix attributes)")
-    sub.add_parser("list", help="list declared packages")
+        "add", help="add package(s) to manifest (nixpkgs attribute names)"
+    )
+    p_add.add_argument(
+        "pkgs",
+        nargs="+",
+        help="package name(s) (nix attribute names, e.g., git)",
+    )
+
+    p_rm = sub.add_parser(
+        "remove", help="remove package(s) from manifest"
+    )
+    p_rm.add_argument(
+        "pkgs",
+        nargs="+",
+        help="package name(s) (nix attribute names)",
+    )
+
+    sub.add_parser(
+        "list", help="list declared packages and installed packages")
     p_build = sub.add_parser(
-        "build", help="generate flake for current manifest")
-    p_build.add_argument("--force", "-f", action="store_true",
-                         help="force regeneration even if unchanged")
-    p_build.add_argument("--show", action="store_true",
-                         help="print generated flake.nix to stdout")
-    sub.add_parser("apply", help="apply last generated flake to profile")
-    sub.add_parser("rollback", help="rollback profile to previous generation")
-    p_search = sub.add_parser("search", help="search nixpkgs via nix search")
-    p_search.add_argument("term", help="search term")
-    sub.add_parser("status", help="show manifest hash and active flake")
+        "build", help="generate or update the flake for current manifest"
+    )
+    p_build.add_argument(
+        "--force", "-f",
+        action="store_true",
+        help="force regeneration even if unchanged",
+    )
+    p_build.add_argument(
+        "--show",
+        action="store_true",
+        help="print generated flake.nix to stdout",
+    )
+
+    sub.add_parser(
+        "apply", help="apply the last built flake to your Nix profile")
+    sub.add_parser(
+        "rollback", help="rollback the profile via nix profile rollback")
+    sub.add_parser(
+        "status", help="show manifest, sync status, and active flake")
+
     args = parser.parse_args(argv)
+
     if args.cmd == "init":
         cmd_init()
     elif args.cmd == "add":
@@ -489,13 +489,11 @@ def main(argv=None) -> None:
     elif args.cmd == "list":
         cmd_list()
     elif args.cmd == "build":
-        build_flake(force=args.force, show=args.show)
+        build_cmd(force=args.force, show=args.show)
     elif args.cmd == "apply":
-        apply_profile()
+        cmd_apply()
     elif args.cmd == "rollback":
-        rollback_profile()
-    elif args.cmd == "search":
-        cmd_search(args.term)
+        cmd_rollback()
     elif args.cmd == "status":
         cmd_status()
     else:
