@@ -1,6 +1,11 @@
+import os
+import re
+import json
 import pathlib
 import argparse
 import textwrap
+import subprocess
+from typing import Optional
 
 import message
 from flake import Flake
@@ -16,7 +21,7 @@ def cmd_init() -> None:
     flake.create()
     manifest = Manifest(ZIX_DIR / "zix.json")
     manifest.create()
-    message.ok("zix initialized.")
+    message.ok("zix initialized successfully.")
 
 
 def cmd_add(manifest: Manifest, pkg: str) -> None:
@@ -27,12 +32,95 @@ def cmd_remove(manifest: Manifest, pkg: str) -> None:
     manifest.pkg_remove(pkg)
 
 
+def get_installed_packages() -> Optional[set[str]]:
+    try:
+        current_env = subprocess.check_output(
+            ["readlink", "-f", os.path.expanduser("~/.nix-profile")],
+            text=True
+        ).strip()
+
+        if not current_env:
+            message.warn("No nix environment currently active")
+            return None
+
+        message.info(f"Current environment: {os.path.basename(current_env)}")
+
+        if "zix-profile" not in current_env:
+            message.warn("Not a zix environment")
+            return None
+
+        drv_path = subprocess.check_output(
+            ["nix-store", "--query", "--deriver", current_env],
+            text=True
+        ).strip()
+
+        drv_json = subprocess.check_output(
+            ["nix", "derivation", "show", drv_path],
+            text=True
+        )
+
+        pattern = r'/nix/store/[^/]+-([a-zA-Z0-9._+-]+?)-[\d.]+(?:-|$)'
+        installed_packages = set(re.findall(pattern, drv_json))
+
+        if not installed_packages:
+            drv_data = json.loads(drv_json)
+            pkgs_json = list(drv_data.values())[0]["env"]["pkgs"]
+            pkgs_data = json.loads(pkgs_json)
+            installed_packages = set()
+            for item in pkgs_data:
+                for path in item["paths"]:
+                    basename = os.path.basename(path)
+                    pkg_name = re.sub(r'^[^-]+-', '', basename)
+                    pkg_name = re.sub(r'-[0-9][^-]*$', '', pkg_name)
+                    installed_packages.add(pkg_name)
+
+        return installed_packages
+
+    except Exception as e:
+        message.warn(f"Could not query installed packages: {e}")
+        return None
+
+
+def compare_manifest_with_installed(manifest_packages: set[str],
+                                    installed_packages: set[str]) -> None:
+    if manifest_packages == installed_packages:
+        message.ok("Environment is in sync with manifest")
+        return
+
+    message.warn("Out of sync!")
+    missing = manifest_packages - installed_packages
+    extra = installed_packages - manifest_packages
+
+    if missing:
+        print(f"  Missing packages: {', '.join(sorted(missing))}")
+    if extra:
+        print(f"  Extra packages: {', '.join(sorted(extra))}")
+
+    print()
+    message.info("Sync using: zix apply")
+
+
 def cmd_list(manifest: Manifest) -> None:
     profile = manifest.content["current_profile"]
-    pkgs = manifest.content["profiles"][profile]["packages"]
+    manifest_pkgs = set(manifest.content["profiles"][profile]["packages"])
+
     message.info(f"Packages in profile '{profile}':")
-    for pkg in pkgs:
+    for pkg in sorted(manifest_pkgs):
         print(f"  - {pkg}")
+
+    print()
+
+    installed_pkgs = get_installed_packages()
+    if not installed_pkgs:
+        return
+
+    message.info("Installed packages:")
+    for pkg in sorted(installed_pkgs):
+        print(f"  - {pkg}")
+
+    print()
+
+    compare_manifest_with_installed(manifest_pkgs, installed_pkgs)
 
 
 def cmd_profile(manifest: Manifest, args) -> None:
@@ -42,7 +130,7 @@ def cmd_profile(manifest: Manifest, args) -> None:
         manifest.cmd_profile_remove(args.profile_name)
     elif args.profile_cmd == "list":
         profiles = manifest.content["profiles"].keys()
-        message.info("Profiles:")
+        message.info("Available profiles:")
         for p in profiles:
             if p == manifest.content["current_profile"]:
                 print(f"  - {p} (current)")

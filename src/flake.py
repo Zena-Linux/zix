@@ -65,7 +65,7 @@ class Flake:
     def create(self):
         file = self.file
         if not file.exists():
-            message.warn("Flake does not exist. Creating flake...")
+            message.warn("Flake does not exist, creating it...")
             atomic_write(file, FLAKE_TEMPLATE)
             message.ok(f"Created flake at {file}")
 
@@ -91,6 +91,6 @@ class Flake:
     def rollback(self):
         directory = self.directory
         self.create()
-        message.info("Rolling back...")
+        message.info("Rolling back to previous generation...")
         return run_proc(["nix", "run", f"{directory}#profile.rollback"],
                         cwd=directory)

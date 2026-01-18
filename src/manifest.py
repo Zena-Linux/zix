@@ -20,7 +20,10 @@ class Manifest:
             self.normalize(raw)
 
     def create(self):
-        write_json(self.file, self.content)
+        file = self.file
+        message.info("Manifest does not exist, creating it...")
+        write_json(file, self.content)
+        message.ok(f"Created manifest at {file}")
 
     def normalize(self, content=None) -> Dict:
         try:
@@ -101,7 +104,7 @@ class Manifest:
         pkgs["packages"].remove(pkg)
         content["profiles"][profile] = pkgs
         self.write(content)
-        message.ok(f"Removed {pkg} to profile '{profile}'.")
+        message.ok(f"Removed {pkg} from profile '{profile}'.")
 
     def profile_switch(self, profile):
         content = self.content
@@ -110,7 +113,7 @@ class Manifest:
             message.error(f"Profile '{profile}' does not exist.")
             message.info(f"Available profiles: {', '.join(
                 sorted(content['profiles'].keys()))}")
-            message.info(f"Create it with: zix profile create {profile}")
+            message.info(f"Create it with: zix profile add {profile}")
             return
 
         content["current_profile"] = profile
@@ -145,5 +148,5 @@ class Manifest:
                 f"Switched to default profile before removing '{profile}'.")
 
         del content["profiles"][profile]
-        self.write_manifest(content)
+        self.write(content)
         message.ok(f"Removed profile '{profile}'.")
