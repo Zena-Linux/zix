@@ -9,61 +9,58 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 from typing import Dict, List, Optional
 import re
 import textwrap
 
 HOME = pathlib.Path.home().resolve()
-LOCAL_DIR = HOME / ".local" / "share" / "zix"
-LOCAL_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_DIR = HOME / ".config" / "zix"
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 MANIFEST_FILE = CONFIG_DIR / "zix.json"
-STATE_FILE = LOCAL_DIR / "state.json"
+FLAKE_DIR = CONFIG_DIR / "flake"
+FLAKE_DIR.mkdir(parents=True, exist_ok=True)
 
 FLAKE_TEMPLATE = textwrap.dedent("""\
-{{
+{
   description = "zix generated profile";
 
-  inputs = {{
-    {nixpkgs_line}
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-  }};
+  };
 
-  outputs = {{ self, nixpkgs, flake-utils }}:
+  outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = nixpkgs.legacyPackages.${{system}};
-        env = pkgs.buildEnv {{
+        pkgs = nixpkgs.legacyPackages.${system};
+        manifest = builtins.fromJSON (builtins.readFile ./packages.json);
+        env = pkgs.buildEnv {
           name = "zix-profile";
-          paths = with pkgs; [
-{pkg_refs}
-          ];
-        }};
+          paths = builtins.map (pkg: pkgs.${pkg}) manifest.packages;
+        };
         switchScript = pkgs.writeShellScriptBin "switch" ''
-          nix-env --set ${{env}}
+          nix-env --set ${env}
         '';
         rollbackScript = pkgs.writeShellScriptBin "rollback" ''
           nix-env --rollback
         '';
-      in {{
+      in {
         defaultPackage = env;
-        apps = {{
-          profile = {{
-            switch = {{
+        apps = {
+          profile = {
+            switch = {
               type = "app";
-              program = "${{switchScript}}/bin/switch";
-            }};
-            rollback = {{
+              program = "${switchScript}/bin/switch";
+            };
+            rollback = {
               type = "app";
-              program = "${{rollbackScript}}/bin/rollback";
-            }};
-          }};
-        }};
-      }});
-}}
+              program = "${rollbackScript}/bin/rollback";
+            };
+          };
+        };
+      });
+}
 """)
 
 
@@ -160,31 +157,6 @@ def write_manifest(man: Dict) -> None:
     write_json(MANIFEST_FILE, norm)
 
 
-def read_state() -> Dict:
-    return read_json(STATE_FILE, {})
-
-
-def save_state(state: Dict) -> None:
-    write_json(STATE_FILE, state)
-
-
-def flake_dir() -> pathlib.Path:
-    d = LOCAL_DIR / "flake"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def generate_flake_nix_text(packages: List[str],
-                            nixpkgs_ref: Optional[str] = None) -> str:
-    if nixpkgs_ref:
-        nixpkgs_line = f'nixpkgs.url = "{nixpkgs_ref}";'
-    else:
-        nixpkgs_line = 'nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";'
-    pkg_lines = [f"            pkgs.{pkg}" for pkg in packages]
-    pkg_refs = "\n".join(pkg_lines) if pkg_lines else ""
-    return FLAKE_TEMPLATE.format(nixpkgs_line=nixpkgs_line, pkg_refs=pkg_refs)
-
-
 def ensure_nix_available() -> bool:
     return shutil.which("nix") is not None
 
@@ -269,7 +241,7 @@ def compare_manifest_with_installed(manifest_packages: set[str],
         print(f"  Extra packages: {', '.join(sorted(extra))}")
 
     print()
-    info("Sync using: zix build && zix apply")
+    info("Sync using: zix apply")
 
 
 def cmd_init() -> None:
@@ -331,85 +303,60 @@ def cmd_list() -> None:
     compare_manifest_with_installed(manifest_packages, installed_packages)
 
 
-def build_cmd(force: bool = False, show: bool = False) -> None:
-    flake_d = flake_dir()
-    flake_path = flake_d / "flake.nix"
-    man = read_manifest()
-    generated = generate_flake_nix_text(
-        man.get("packages", []), man.get("nixpkgs")
-    )
+def cmd_build(force: bool = False, show: bool = False) -> None:
+    flake_path = FLAKE_DIR / "flake.nix"
+    packages_json = FLAKE_DIR / "packages.json"
 
-    if flake_path.exists() and flake_path.read_text() == \
-            generated and not force:
-        ok("flake already up-to-date")
+    if not flake_path.exists() or force:
+        atomic_write(flake_path, FLAKE_TEMPLATE)
+        ok(f"Created/updated flake at {flake_path}")
     else:
-        atomic_write(flake_path, generated)
-        ok(f"Written flake to {flake_path}")
+        ok("Flake already exists")
 
-    if show:
-        print("----- flake.nix -----")
-        print(generated)
-        print("---------------------")
+    if packages_json.exists():
+        if not packages_json.is_symlink():
+            warn(f"{packages_json} exists but is not a symlink, removing")
+            packages_json.unlink()
+        elif packages_json.resolve() != MANIFEST_FILE:
+            warn("packages.json symlink points elsewhere, updating")
+            packages_json.unlink()
+
+    if not packages_json.exists():
+        os.symlink(MANIFEST_FILE, packages_json)
+        ok(f"Created symlink: {packages_json} -> {MANIFEST_FILE}")
 
     if ensure_nix_available():
-        run_proc(["nix", "flake", "lock"], cwd=flake_d, check=False)
+        run_proc(["nix", "flake", "lock"], cwd=FLAKE_DIR, check=False)
+        ok("Updated flake.lock")
     else:
         warn("nix CLI not found; skipping lock")
 
-    state = read_state()
-    state["current_flake"] = str(flake_d.resolve())
-    state["last_built"] = int(time.time())
-    save_state(state)
+    if show:
+        print("----- flake.nix -----")
+        print(FLAKE_TEMPLATE)
+        print("---------------------")
 
 
 def cmd_apply() -> None:
-    state = read_state()
-    flake = state.get("current_flake")
-    if not flake:
-        error("No flake built yet. Run `zix build` first.")
+    flake_path = FLAKE_DIR / "flake.nix"
+    if not flake_path.exists():
+        error("Flake does not exist. Run `zix build` first.")
         return
     if not ensure_nix_available():
         error("nix CLI not found; cannot apply.")
         return
-    run_proc(["nix", "run", f"path:{
-             flake}#profile.switch"], cwd=pathlib.Path(flake))
+    run_proc(["nix", "run", f"{FLAKE_DIR}#profile.switch"], cwd=FLAKE_DIR)
 
 
 def cmd_rollback() -> None:
-    state = read_state()
-    flake = state.get("current_flake")
-    if not flake:
-        error("No flake built yet.")
+    flake_path = FLAKE_DIR / "flake.nix"
+    if not flake_path.exists():
+        error("Flake does not exist. Run `zix build` first.")
         return
     if not ensure_nix_available():
         error("nix CLI not found; cannot rollback.")
         return
-    run_proc(["nix", "run", f"path:{
-             flake}#profile.rollback"], cwd=pathlib.Path(flake))
-
-
-def cmd_status() -> None:
-    man = read_manifest()
-    manifest_packages = set(man.get("packages", []))
-    state = read_state()
-
-    print(f"manifest: {MANIFEST_FILE.resolve()}")
-    print(f"packages: {len(manifest_packages)}")
-
-    installed_packages = get_installed_packages()
-    if installed_packages is not None:
-        print()
-        compare_manifest_with_installed(manifest_packages, installed_packages)
-
-    print()
-    active = state.get("current_flake")
-    if active:
-        print(f"active_flake: {active}")
-        last = state.get("last_built")
-        if last:
-            print(f"last_built: {time.ctime(last)}")
-    else:
-        print("active_flake: (none)")
+    run_proc(["nix", "run", f"{FLAKE_DIR}#profile.rollback"], cwd=FLAKE_DIR)
 
 
 def main(argv=None) -> None:
@@ -420,7 +367,6 @@ def main(argv=None) -> None:
         "  zix add git\n"
         "  zix build --show\n"
         "  zix apply\n"
-        "  zix status\n"
         "  zix list\n"
     )
 
@@ -456,25 +402,23 @@ def main(argv=None) -> None:
     sub.add_parser(
         "list", help="list declared packages and installed packages")
     p_build = sub.add_parser(
-        "build", help="generate or update the flake for current manifest"
+        "build", help="generate flake.nix and symlink packages.json"
     )
     p_build.add_argument(
         "--force", "-f",
         action="store_true",
-        help="force regeneration even if unchanged",
+        help="force regeneration of flake.nix",
     )
     p_build.add_argument(
         "--show",
         action="store_true",
-        help="print generated flake.nix to stdout",
+        help="print flake.nix to stdout",
     )
 
     sub.add_parser(
-        "apply", help="apply the last built flake to your Nix profile")
+        "apply", help="apply the flake to your Nix profile")
     sub.add_parser(
-        "rollback", help="rollback the profile via nix profile rollback")
-    sub.add_parser(
-        "status", help="show manifest, sync status, and active flake")
+        "rollback", help="rollback the profile via nix-env rollback")
 
     args = parser.parse_args(argv)
 
@@ -489,13 +433,11 @@ def main(argv=None) -> None:
     elif args.cmd == "list":
         cmd_list()
     elif args.cmd == "build":
-        build_cmd(force=args.force, show=args.show)
+        cmd_build(force=args.force, show=args.show)
     elif args.cmd == "apply":
         cmd_apply()
     elif args.cmd == "rollback":
         cmd_rollback()
-    elif args.cmd == "status":
-        cmd_status()
     else:
         parser.print_help()
 
