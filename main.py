@@ -35,9 +35,11 @@ FLAKE_TEMPLATE = textwrap.dedent("""\
       let
         pkgs = nixpkgs.legacyPackages.${system};
         manifest = builtins.fromJSON (builtins.readFile ./packages.json);
+        currentProfile = if manifest.current_profile != "" then manifest.current_profile else "default";
+        profilePackages = manifest.profiles.${currentProfile}.packages or [];
         env = pkgs.buildEnv {
           name = "zix-profile";
-          paths = builtins.map (pkg: pkgs.${pkg}) manifest.packages;
+          paths = builtins.map (pkg: pkgs.${pkg}) profilePackages;
         };
         switchScript = pkgs.writeShellScriptBin "switch" ''
           nix-env --set ${env}
@@ -126,25 +128,56 @@ def validate_pkg_name(name: str) -> None:
 
 
 def normalize_manifest(man: Dict) -> Dict:
-    pkgs = man.get("packages", [])
-    if not isinstance(pkgs, list):
-        raise ValueError("manifest 'packages' must be a list")
-    cleaned: List[str] = []
-    for p in pkgs:
-        if not isinstance(p, str):
-            raise ValueError(f"package {p!r} is not a string")
-        s = p.strip()
-        if s:
-            cleaned.append(s)
-    unique_sorted = sorted(set(cleaned))
-    return {"packages": unique_sorted,
-            **({k: v for k, v in man.items() if k != "packages"})}
+    """Normalize manifest to ensure consistent structure."""
+    # Ensure current_profile exists
+    if "current_profile" not in man:
+        man["current_profile"] = "default"
+
+    # Ensure profiles exists
+    if "profiles" not in man:
+        man["profiles"] = {}
+
+    # Ensure default profile exists
+    if "default" not in man["profiles"]:
+        man["profiles"]["default"] = {"packages": []}
+
+    # Clean each profile's packages
+    for profile_name, profile_data in man["profiles"].items():
+        if not isinstance(profile_data, dict):
+            man["profiles"][profile_name] = {"packages": []}
+            continue
+
+        pkgs = profile_data.get("packages", [])
+        if not isinstance(pkgs, list):
+            man["profiles"][profile_name]["packages"] = []
+            continue
+
+        cleaned: List[str] = []
+        for p in pkgs:
+            if not isinstance(p, str):
+                continue
+            s = p.strip()
+            if s:
+                cleaned.append(s)
+
+        unique_sorted = sorted(set(cleaned))
+        man["profiles"][profile_name]["packages"] = unique_sorted
+
+    # Ensure current_profile exists in profiles
+    if man["current_profile"] not in man["profiles"]:
+        warn(f"Current profile '{man['current_profile']}' doesn't exist, switching to 'default'")
+        man["current_profile"] = "default"
+        if "default" not in man["profiles"]:
+            man["profiles"]["default"] = {"packages": []}
+
+    return man
 
 
 def read_manifest() -> Dict:
     if not MANIFEST_FILE.exists():
-        return {"packages": []}
-    raw = read_json(MANIFEST_FILE, {"packages": []})
+        return {"current_profile": "default", "profiles": {"default": {"packages": []}}}
+
+    raw = read_json(MANIFEST_FILE, {"current_profile": "default", "profiles": {"default": {"packages": []}}})
     try:
         return normalize_manifest(raw)
     except ValueError as exc:
@@ -248,8 +281,8 @@ def cmd_init() -> None:
     if MANIFEST_FILE.exists():
         warn("Manifest already exists; no changes made.")
         return
-    write_manifest({"packages": []})
-    ok("Created zix.json (empty manifest).")
+    write_manifest({"current_profile": "default", "profiles": {"default": {"packages": []}}})
+    ok("Created zix.json with default profile.")
 
 
 def cmd_add(pkg: str) -> None:
@@ -258,30 +291,54 @@ def cmd_add(pkg: str) -> None:
     except ValueError as exc:
         error(str(exc))
         return
+
     man = read_manifest()
-    if pkg in man["packages"]:
-        warn(f"{pkg} already present.")
+    current_profile = man["current_profile"]
+    profile_data = man["profiles"].get(current_profile, {"packages": []})
+
+    if pkg in profile_data.get("packages", []):
+        warn(f"{pkg} already present in profile '{current_profile}'.")
         return
-    man["packages"].append(pkg)
+
+    profile_data["packages"].append(pkg)
+    man["profiles"][current_profile] = profile_data
     write_manifest(man)
-    ok(f"Added {pkg} to manifest.")
+    ok(f"Added {pkg} to profile '{current_profile}'.")
 
 
 def cmd_remove(pkg: str) -> None:
     man = read_manifest()
-    if pkg not in man["packages"]:
-        warn(f"{pkg} not in manifest.")
+    current_profile = man["current_profile"]
+    profile_data = man["profiles"].get(current_profile, {"packages": []})
+
+    if pkg not in profile_data.get("packages", []):
+        warn(f"{pkg} not in profile '{current_profile}'.")
         return
-    man["packages"].remove(pkg)
+
+    profile_data["packages"].remove(pkg)
+    man["profiles"][current_profile] = profile_data
     write_manifest(man)
-    ok(f"Removed {pkg} from manifest.")
+    ok(f"Removed {pkg} from profile '{current_profile}'.")
 
 
 def cmd_list() -> None:
     man = read_manifest()
-    manifest_packages = set(man.get("packages", []))
+    current_profile = man["current_profile"]
 
-    info("Manifest packages:")
+    info(f"Current profile: {current_profile}")
+    print()
+
+    info("Available profiles:")
+    for profile_name in sorted(man["profiles"].keys()):
+        prefix = " * " if profile_name == current_profile else "   "
+        package_count = len(man["profiles"][profile_name].get("packages", []))
+        print(f"{prefix}{profile_name} ({package_count} packages)")
+
+    print()
+    current_profile_data = man["profiles"].get(current_profile, {"packages": []})
+    manifest_packages = set(current_profile_data.get("packages", []))
+
+    info(f"Manifest packages for '{current_profile}':")
     if manifest_packages:
         for p in sorted(manifest_packages):
             print(f"  - {p}")
@@ -301,6 +358,81 @@ def cmd_list() -> None:
 
     print()
     compare_manifest_with_installed(manifest_packages, installed_packages)
+
+
+def cmd_profile_list() -> None:
+    """List all profiles with their packages."""
+    man = read_manifest()
+    current_profile = man["current_profile"]
+
+    info(f"Current profile: {current_profile}")
+    print()
+
+    for profile_name in sorted(man["profiles"].keys()):
+        prefix = " * " if profile_name == current_profile else "   "
+        profile_data = man["profiles"][profile_name]
+        packages = profile_data.get("packages", [])
+        print(f"{prefix}{profile_name}:")
+        for pkg in sorted(packages):
+            print(f"      - {pkg}")
+        if not packages:
+            print("      (empty)")
+        print()
+
+
+def cmd_profile_create(profile_name: str) -> None:
+    """Create a new profile."""
+    if not profile_name:
+        error("Profile name cannot be empty")
+        return
+
+    man = read_manifest()
+
+    if profile_name in man["profiles"]:
+        warn(f"Profile '{profile_name}' already exists.")
+        return
+
+    man["profiles"][profile_name] = {"packages": []}
+    write_manifest(man)
+    ok(f"Created profile '{profile_name}'.")
+
+
+def cmd_profile_switch(profile_name: str) -> None:
+    """Switch to a different profile."""
+    man = read_manifest()
+
+    if profile_name not in man["profiles"]:
+        error(f"Profile '{profile_name}' does not exist.")
+        info(f"Available profiles: {', '.join(sorted(man['profiles'].keys()))}")
+        info(f"Create it with: zix profile create {profile_name}")
+        return
+
+    man["current_profile"] = profile_name
+    write_manifest(man)
+    ok(f"Switched to profile '{profile_name}'.")
+    info(f"Run 'zix apply' to install packages for this profile.")
+
+
+def cmd_profile_remove(profile_name: str) -> None:
+    """Remove a profile."""
+    if profile_name == "default":
+        error("Cannot remove the default profile.")
+        return
+
+    man = read_manifest()
+
+    if profile_name not in man["profiles"]:
+        error(f"Profile '{profile_name}' does not exist.")
+        return
+
+    # If current profile is being removed, switch to default first
+    if man["current_profile"] == profile_name:
+        man["current_profile"] = "default"
+        info(f"Switched to default profile before removing '{profile_name}'.")
+
+    del man["profiles"][profile_name]
+    write_manifest(man)
+    ok(f"Removed profile '{profile_name}'.")
 
 
 def cmd_build(force: bool = False, show: bool = False) -> None:
@@ -345,6 +477,11 @@ def cmd_apply() -> None:
     if not ensure_nix_available():
         error("nix CLI not found; cannot apply.")
         return
+
+    man = read_manifest()
+    current_profile = man["current_profile"]
+    info(f"Applying profile '{current_profile}'...")
+
     run_proc(["nix", "run", "--impure", f"{FLAKE_DIR}#profile.switch"], cwd=FLAKE_DIR)
 
 
@@ -364,6 +501,8 @@ def main(argv=None) -> None:
     epilog = textwrap.dedent(
         "Examples:\n"
         "  zix init\n"
+        "  zix profile create work\n"
+        "  zix profile switch work\n"
         "  zix add git\n"
         "  zix build --show\n"
         "  zix apply\n"
@@ -382,7 +521,7 @@ def main(argv=None) -> None:
     sub.add_parser("init", help="create a new zix.json manifest")
 
     p_add = sub.add_parser(
-        "add", help="add package(s) to manifest (nixpkgs attribute names)"
+        "add", help="add package(s) to current profile"
     )
     p_add.add_argument(
         "pkgs",
@@ -391,7 +530,7 @@ def main(argv=None) -> None:
     )
 
     p_rm = sub.add_parser(
-        "remove", help="remove package(s) from manifest"
+        "remove", help="remove package(s) from current profile"
     )
     p_rm.add_argument(
         "pkgs",
@@ -400,7 +539,36 @@ def main(argv=None) -> None:
     )
 
     sub.add_parser(
-        "list", help="list declared packages and installed packages")
+        "list", help="list declared packages and installed packages for current profile")
+
+    sub.add_parser(
+        "profile-list", help="list all profiles with their packages"
+    )
+
+    p_profile_create = sub.add_parser(
+        "profile-create", help="create a new profile"
+    )
+    p_profile_create.add_argument(
+        "profile_name",
+        help="name of the new profile"
+    )
+
+    p_profile_switch = sub.add_parser(
+        "profile-switch", help="switch to a different profile"
+    )
+    p_profile_switch.add_argument(
+        "profile_name",
+        help="name of the profile to switch to"
+    )
+
+    p_profile_remove = sub.add_parser(
+        "profile-remove", help="remove a profile"
+    )
+    p_profile_remove.add_argument(
+        "profile_name",
+        help="name of the profile to remove"
+    )
+
     p_build = sub.add_parser(
         "build", help="generate flake.nix and symlink packages.json"
     )
@@ -432,6 +600,14 @@ def main(argv=None) -> None:
             cmd_remove(pkg)
     elif args.cmd == "list":
         cmd_list()
+    elif args.cmd == "profile-list":
+        cmd_profile_list()
+    elif args.cmd == "profile-create":
+        cmd_profile_create(args.profile_name)
+    elif args.cmd == "profile-switch":
+        cmd_profile_switch(args.profile_name)
+    elif args.cmd == "profile-remove":
+        cmd_profile_remove(args.profile_name)
     elif args.cmd == "build":
         cmd_build(force=args.force, show=args.show)
     elif args.cmd == "apply":
