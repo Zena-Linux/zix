@@ -20,12 +20,28 @@ FLAKE_TEMPLATE = textwrap.dedent("""\
                          then manifest.current_profile
                          else "default";
         profilePackages = manifest.profiles.${currentProfile}.packages or [];
+        pkgsJsonText = builtins.toJSON profilePackages;
+
+        # Create the packages.json file as a separate derivation
+        zixData = pkgs.runCommand "zix-data" {} ''
+          mkdir -p $out/share/zix
+          echo '${pkgsJsonText}' > $out/share/zix/packages.json
+        '';
+
+        # Build the environment with packages
         env = pkgs.buildEnv {
-          name = "zix-profile";
+          name = "zix-env";
           paths = builtins.map (pkg: pkgs.${pkg}) profilePackages;
         };
+
+        # Combine the environment with zix data
+        profile = pkgs.buildEnv {
+          name = "zix-profile";
+          paths = [ env zixData ];
+        };
+
         switchScript = pkgs.writeShellScriptBin "switch" ''
-          nix-env --set ${env}
+          nix-env --set ${profile}
         '';
         rollbackScript = pkgs.writeShellScriptBin "rollback" ''
           nix-env --rollback
@@ -34,7 +50,7 @@ FLAKE_TEMPLATE = textwrap.dedent("""\
           nix build . --no-link
         '';
       in {
-        defaultPackage = env;
+        defaultPackage = profile;
         apps = {
           profile = {
             switch = {
@@ -51,7 +67,8 @@ FLAKE_TEMPLATE = textwrap.dedent("""\
             };
           };
         };
-      });
+      }
+    );
 }
 """)
 

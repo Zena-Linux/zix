@@ -21,9 +21,10 @@ class Manifest:
 
     def create(self):
         file = self.file
-        message.info("Manifest does not exist, creating it...")
-        write_json(file, self.content)
-        message.ok(f"Created manifest at {file}")
+        if not file.exists():
+            message.info("Manifest does not exist, creating it...")
+            write_json(file, self.content)
+            message.ok(f"Created manifest at {file}")
 
     def normalize(self, content=None) -> Dict:
         try:

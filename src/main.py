@@ -1,11 +1,9 @@
 import os
-import re
 import json
 import pathlib
 import argparse
 import textwrap
-import subprocess
-from typing import Optional
+from typing import Set, Optional
 
 import message
 from flake import Flake
@@ -32,52 +30,18 @@ def cmd_remove(manifest: Manifest, pkg: str) -> None:
     manifest.pkg_remove(pkg)
 
 
-def get_installed_packages() -> Optional[set[str]]:
+def get_installed_packages() -> Optional[Set[str]]:
+    packages_file = os.path.expanduser(
+        "~/.nix-profile/share/zix/packages.json")
     try:
-        current_env = subprocess.check_output(
-            ["readlink", "-f", os.path.expanduser("~/.nix-profile")],
-            text=True
-        ).strip()
-
-        if not current_env:
-            message.warn("No nix environment currently active")
-            return None
-
-        message.info(f"Current environment: {os.path.basename(current_env)}")
-
-        if "zix-profile" not in current_env:
-            message.warn("Not a zix environment")
-            return None
-
-        drv_path = subprocess.check_output(
-            ["nix-store", "--query", "--deriver", current_env],
-            text=True
-        ).strip()
-
-        drv_json = subprocess.check_output(
-            ["nix", "derivation", "show", drv_path],
-            text=True
-        )
-
-        pattern = r'/nix/store/[^/]+-([a-zA-Z0-9._+-]+?)-[\d.]+(?:-|$)'
-        installed_packages = set(re.findall(pattern, drv_json))
-
-        if not installed_packages:
-            drv_data = json.loads(drv_json)
-            pkgs_json = list(drv_data.values())[0]["env"]["pkgs"]
-            pkgs_data = json.loads(pkgs_json)
-            installed_packages = set()
-            for item in pkgs_data:
-                for path in item["paths"]:
-                    basename = os.path.basename(path)
-                    pkg_name = re.sub(r'^[^-]+-', '', basename)
-                    pkg_name = re.sub(r'-[0-9][^-]*$', '', pkg_name)
-                    installed_packages.add(pkg_name)
-
-        return installed_packages
-
-    except Exception as e:
-        message.warn(f"Could not query installed packages: {e}")
+        with open(packages_file, "r") as f:
+            packages = json.load(f)
+        return set(packages)
+    except FileNotFoundError:
+        message.warn(f"{packages_file} not found")
+        return None
+    except json.JSONDecodeError as e:
+        message.warn(f"Failed to parse {packages_file}: {e}")
         return None
 
 
