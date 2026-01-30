@@ -105,6 +105,13 @@ class Flake:
              "--impure", f"{directory}#profile.switch"],
             cwd=directory)
 
+    def update(self):
+        """Update flake inputs (nixpkgs, etc.)"""
+        directory = self.directory
+        self.create()
+        message.info("Updating flake inputs...")
+        return run_proc(["nix", "flake", "update"], cwd=directory)
+
     def rollback(self):
         directory = self.directory
         self.create()

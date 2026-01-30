@@ -112,6 +112,10 @@ def cmd_apply(flake: Flake) -> None:
     flake.apply()
 
 
+def cmd_update(flake: Flake) -> None:
+    flake.update()
+
+
 def cmd_rollback(flake: Flake) -> None:
     flake.rollback()
 
@@ -126,9 +130,10 @@ def build_parser() -> argparse.ArgumentParser:
         "  zix profile list\n"
         "  zix profile remove work\n"
         "  zix add git\n"
-        "  zix build --show\n"
+        "  zix build\n"
         "  zix apply\n"
         "  zix list\n"
+        "  zix update\n"
     )
 
     parser = argparse.ArgumentParser(
@@ -169,6 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("build", help="build the profile")
     sub.add_parser("apply", help="apply the profile")
+    sub.add_parser("update", help="update the profile")
     sub.add_parser("rollback", help="rollback profile")
 
     return parser
@@ -197,6 +203,9 @@ def dispatch(args, manifest: Manifest, flake: Flake) -> None:
 
     elif args.cmd == "apply":
         cmd_apply(flake)
+
+    elif args.cmd == "update":
+        cmd_update(flake)
 
     elif args.cmd == "rollback":
         cmd_rollback(flake)
