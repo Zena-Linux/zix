@@ -109,7 +109,7 @@ class Flake:
         """Update flake inputs (nixpkgs, etc.)"""
         directory = self.directory
         self.create()
-        message.info("Updating flake inputs...")
+        message.info("Updating flake...")
         return run_proc(["nix", "flake", "update"], cwd=directory)
 
     def rollback(self):
