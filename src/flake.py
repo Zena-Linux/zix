@@ -14,7 +14,12 @@ FLAKE_TEMPLATE = textwrap.dedent("""\
   outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = nixpkgs.legacyPackages.${system};
+        pkgs = import nixpkgs {
+          inherit system;
+          config = {
+            allowUnfree = true;
+          };
+        };
         manifest = builtins.fromJSON (builtins.readFile ./zix.json);
         currentProfile = if manifest.current_profile != ""
                          then manifest.current_profile
@@ -86,9 +91,15 @@ class Flake:
             atomic_write(file, FLAKE_TEMPLATE)
             message.ok(f"Created flake at {file}")
 
+    def update_flake(self):
+        file = self.file
+        atomic_write(file, FLAKE_TEMPLATE)
+        message.ok(f"Updated flake at {file}")
+
     def build(self) -> int:
         directory = self.directory
         profile = self.profile
+        self.create()
         message.info(f"Building profile '{profile}'...")
         return run_proc(
             ["nix", "run", "--impure", f"{directory}#profile.build"],
@@ -109,6 +120,7 @@ class Flake:
         """Update flake inputs (nixpkgs, etc.)"""
         directory = self.directory
         self.create()
+        self.update_flake()
         message.info("Updating flake...")
         return run_proc(["nix", "flake", "update"], cwd=directory)
 
