@@ -20,6 +20,8 @@ FLAKE_TEMPLATE = textwrap.dedent("""\
             allowUnfree = true;
           };
         };
+        
+        lib = nixpkgs.lib;
         manifest = builtins.fromJSON (builtins.readFile ./zix.json);
         currentProfile = if manifest.current_profile != ""
                          then manifest.current_profile
@@ -27,19 +29,27 @@ FLAKE_TEMPLATE = textwrap.dedent("""\
         profilePackages = manifest.profiles.${currentProfile}.packages or [];
         pkgsJsonText = builtins.toJSON profilePackages;
 
-        # Create the packages.json file as a separate derivation
+        resolvePkg = name:
+          if lib.hasInfix " " name then
+            let
+              expr = "pkgs: with pkgs; ${name}";
+              fn = import (builtins.toFile "expr.nix" expr);
+            in fn pkgs
+          else if lib.hasInfix "." name then
+            lib.attrByPath (lib.splitString "." name) (throw "Package ${name} not found") pkgs
+          else
+            pkgs.${name};
+
         zixData = pkgs.runCommand "zix-data" {} ''
           mkdir -p $out/share/zix
           echo '${pkgsJsonText}' > $out/share/zix/packages.json
         '';
 
-        # Build the environment with packages
         env = pkgs.buildEnv {
           name = "zix-env";
-          paths = builtins.map (pkg: pkgs.${pkg}) profilePackages;
+          paths = builtins.map resolvePkg profilePackages;
         };
 
-        # Combine the environment with zix data
         profile = pkgs.buildEnv {
           name = "zix-profile";
           paths = [ env zixData ];

@@ -1,3 +1,7 @@
 #! /usr/bin/env bash
 
-pyinstaller --onefile --name zix --paths ./src src/main.py
+rm -f dist/zix
+
+python -m zipapp "src" \
+    --output "dist/zix" \
+    --python "/usr/bin/env python3"
